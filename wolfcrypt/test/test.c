@@ -50311,6 +50311,99 @@ static wc_test_ret_t ecc_sig_test(WC_RNG* rng, ecc_key* key)
 }
 #endif
 
+/* Hardware-only ECDSA ports cannot exercise the software SP path. */
+#if defined(WOLFSSL_HAVE_SP_ECC) && !defined(NO_ECC256) && \
+    !defined(NO_ECC_SIGN) && !defined(NO_ECC_VERIFY) && \
+    !defined(WC_NO_RNG) && !defined(WOLF_CRYPTO_CB_ONLY_ECC) && \
+    (ECC_MIN_KEY_SZ <= 256) && \
+    (!defined(WOLFSSL_SE050) || defined(WOLFSSL_SE050_ONLY_KEY_ID)) && \
+    !defined(WOLFSSL_ATECC508A) && !defined(WOLFSSL_ATECC608A) && \
+    !defined(WOLFSSL_MICROCHIP_TA100) && !defined(PLUTON_CRYPTO_ECC) && \
+    !defined(WOLFSSL_CRYPTOCELL) && !defined(WOLFSSL_SILABS_SE_ACCEL) && \
+    !defined(WOLFSSL_KCAPI_ECC) && \
+    !defined(WOLFSSL_XILINX_CRYPT_VERSAL) && \
+    !defined(WOLFSSL_STM32_PKA) && !defined(WOLFSSL_PSOC6_CRYPTO) && \
+    !defined(WOLFSSL_QNX_CAAM) && !defined(WOLFSSL_IMXRT1170_CAAM)
+#define WC_TEST_P256_SOFTWARE_SP
+/* Sign and verify P-256 hashes at one, bit 52, bit 255, and all ones.
+ * Verification exercises SP point normalization and inversion. */
+static wc_test_ret_t ecc_p256_sign_verify_test(WC_RNG* rng)
+{
+    wc_test_ret_t ret;
+#if defined(WOLFSSL_SMALL_STACK) && !defined(WOLFSSL_NO_MALLOC)
+    ecc_key* key;
+#else
+    ecc_key key[1];
+#endif
+    byte hash[32];
+    byte sig[ECC_MAX_SIG_SIZE];
+    word32 sigLen;
+    int verified;
+    int i;
+
+    if (wc_ecc_get_curve_idx(ECC_SECP256R1) == ECC_CURVE_INVALID)
+        return 0;
+#if defined(WOLFSSL_SMALL_STACK) && !defined(WOLFSSL_NO_MALLOC)
+    key = (ecc_key*)XMALLOC(sizeof(ecc_key), HEAP_HINT,
+        DYNAMIC_TYPE_TMP_BUFFER);
+    if (key == NULL)
+        return WC_TEST_RET_ENC_ERRNO;
+#endif
+
+    /* Force the software SP path, even in asynchronous test configurations. */
+    ret = wc_ecc_init_ex(key, HEAP_HINT, INVALID_DEVID);
+    if (ret != 0)
+        goto done_free;
+    ret = wc_ecc_make_key_ex(rng, 32, key, ECC_SECP256R1);
+    if (ret != 0)
+        goto done;
+
+    for (i = 0; i < 4; i++) {
+        XMEMSET(hash, 0, sizeof(hash));
+        if (i == 0)
+            hash[31] = 1;
+        else if (i == 1)
+            hash[25] = 0x10; /* bit 52 */
+        else if (i == 2)
+            hash[0] = 0x80;
+        else
+            XMEMSET(hash, 0xff, sizeof(hash));
+
+        sigLen = sizeof(sig);
+        ret = wc_ecc_sign_hash(hash, sizeof(hash), sig, &sigLen, rng, key);
+        if (ret != 0)
+            goto done;
+        verified = 0;
+        ret = wc_ecc_verify_hash(sig, sigLen, hash, sizeof(hash),
+            &verified, key);
+        if (ret != 0)
+            goto done;
+        if (verified != 1) {
+            ret = WC_TEST_RET_ENC_NC;
+            goto done;
+        }
+        hash[30] ^= 1;
+        verified = 1;
+        ret = wc_ecc_verify_hash(sig, sigLen, hash, sizeof(hash),
+            &verified, key);
+        if (ret != 0)
+            goto done;
+        if (verified != 0) {
+            ret = WC_TEST_RET_ENC_NC;
+            goto done;
+        }
+    }
+
+done:
+    wc_ecc_free(key);
+done_free:
+#if defined(WOLFSSL_SMALL_STACK) && !defined(WOLFSSL_NO_MALLOC)
+    XFREE(key, HEAP_HINT, DYNAMIC_TYPE_TMP_BUFFER);
+#endif
+    return ret;
+}
+#endif
+
 #if defined(HAVE_ECC_KEY_IMPORT) && defined(HAVE_ECC_KEY_EXPORT) && \
    (!defined(WOLF_CRYPTO_CB_ONLY_ECC) || defined(WOLFSSL_SWDEV)) && \
    !defined(WOLFSSL_MICROCHIP_TA100)
@@ -52923,6 +53016,13 @@ WOLFSSL_TEST_SUBROUTINE wc_test_ret_t ecc_test(void)
 #else
     (void)ret;
 #endif
+
+#ifdef WC_TEST_P256_SOFTWARE_SP
+    ret = ecc_p256_sign_verify_test(&rng);
+    if (ret != 0)
+        goto done;
+#endif
+#undef WC_TEST_P256_SOFTWARE_SP
 
     ret = ecc_test_all_curves(&rng);
     if (ret < 0)
@@ -69110,15 +69210,34 @@ static const byte mldsa_kat_digest_87[32] = {
 #define MLDSA_KAT_DIGEST(d) NULL
 #endif
 
+#if defined(WOLFSSL_MLDSA_PUBLIC_KEY) && !defined(WOLFSSL_NO_ML_DSA_65)
+/* SHAKE-256 of the ML-DSA-65 raw public key from seed 00..1f.
+ * Independently generated with OpenSSL 3.5's ML-DSA-65 seed import. */
+static const byte mldsa_kat_pub_digest_65[32] = {
+    0x1b, 0x05, 0x63, 0xe3, 0xcd, 0x33, 0x46, 0x14,
+    0x9c, 0x8c, 0x9e, 0xbc, 0xf2, 0x3b, 0x0a, 0x4e,
+    0x5a, 0x90, 0x0e, 0xea, 0x9c, 0x65, 0x62, 0x79,
+    0x0a, 0x7c, 0x63, 0xe3, 0x86, 0x63, 0xda, 0xa2
+};
+#define MLDSA_KAT_PUB_DIGEST_65 mldsa_kat_pub_digest_65
+#elif !defined(WOLFSSL_NO_ML_DSA_65)
+#define MLDSA_KAT_PUB_DIGEST_65 NULL
+#endif
+
 /* A key generated into an object that already held a key must sign and verify
  * exactly like one generated into a fresh object, whatever the key caches. */
-static wc_test_ret_t mldsa_make_key_reuse_test(int param, const byte* expDigest)
+static wc_test_ret_t mldsa_make_key_reuse_test(int param, const byte* expDigest,
+    const byte* expPubDigest)
 {
     wc_test_ret_t ret;
     wc_MlDsaKey* key = NULL;
     wc_MlDsaKey* freshKey = NULL;
     byte* sig = NULL;
     byte* freshSig = NULL;
+#ifdef WOLFSSL_MLDSA_PUBLIC_KEY
+    byte* pub = NULL;
+    word32 pubLen;
+#endif
     word32 sigLen;
     word32 freshSigLen;
     int sigSz = 0;
@@ -69129,6 +69248,9 @@ static wc_test_ret_t mldsa_make_key_reuse_test(int param, const byte* expDigest)
     int shakeInit = 0;
 #ifndef WOLFSSL_MLDSA_NO_VERIFY
     int res = 0;
+#endif
+#ifndef WOLFSSL_MLDSA_PUBLIC_KEY
+    (void)expPubDigest;
 #endif
 
     key = (wc_MlDsaKey*)XMALLOC(sizeof(wc_MlDsaKey), HEAP_HINT,
@@ -69160,6 +69282,32 @@ static wc_test_ret_t mldsa_make_key_reuse_test(int param, const byte* expDigest)
     ret = wc_MlDsaKey_CheckKey(freshKey);
     if (ret != 0)
         ERROR_OUT(WC_TEST_RET_ENC_EC(ret), out);
+#endif
+#ifdef WOLFSSL_MLDSA_PUBLIC_KEY
+    if (expPubDigest != NULL) {
+        pub = (byte*)XMALLOC(MLDSA_MAX_PUB_KEY_SIZE, HEAP_HINT,
+            DYNAMIC_TYPE_TMP_BUFFER);
+        if (pub == NULL)
+            ERROR_OUT(WC_TEST_RET_ENC_NC, out);
+        pubLen = MLDSA_MAX_PUB_KEY_SIZE;
+        ret = wc_MlDsaKey_ExportPubRaw(freshKey, pub, &pubLen);
+        if (ret != 0)
+            ERROR_OUT(WC_TEST_RET_ENC_EC(ret), out);
+        ret = wc_InitShake256(&shake, HEAP_HINT, INVALID_DEVID);
+        if (ret != 0)
+            ERROR_OUT(WC_TEST_RET_ENC_EC(ret), out);
+        shakeInit = 1;
+        ret = wc_Shake256_Update(&shake, pub, pubLen);
+        if (ret != 0)
+            ERROR_OUT(WC_TEST_RET_ENC_EC(ret), out);
+        ret = wc_Shake256_Final(&shake, digest, (word32)sizeof(digest));
+        if (ret != 0)
+            ERROR_OUT(WC_TEST_RET_ENC_EC(ret), out);
+        if (XMEMCMP(digest, expPubDigest, sizeof(digest)) != 0)
+            ERROR_OUT(WC_TEST_RET_ENC_NC, out);
+        wc_Shake256_Free(&shake);
+        shakeInit = 0;
+    }
 #endif
     freshSigLen = (word32)sigSz;
     ret = wc_MlDsaKey_SignCtxWithSeed(freshKey, NULL, 0, freshSig,
@@ -69236,6 +69384,9 @@ out:
         wc_MlDsaKey_Free(key);
     if (freshKeyInit)
         wc_MlDsaKey_Free(freshKey);
+#ifdef WOLFSSL_MLDSA_PUBLIC_KEY
+    XFREE(pub, HEAP_HINT, DYNAMIC_TYPE_TMP_BUFFER);
+#endif
     XFREE(freshSig, HEAP_HINT, DYNAMIC_TYPE_TMP_BUFFER);
     XFREE(sig, HEAP_HINT, DYNAMIC_TYPE_TMP_BUFFER);
     XFREE(freshKey, HEAP_HINT, DYNAMIC_TYPE_TMP_BUFFER);
@@ -70367,19 +70518,20 @@ WOLFSSL_TEST_SUBROUTINE wc_test_ret_t mldsa_test(void)
 #if !defined(WOLFSSL_MLDSA_NO_SIGN) && !defined(WOLFSSL_MLDSA_NO_MAKE_KEY)
 #ifndef WOLFSSL_NO_ML_DSA_44
     ret = mldsa_make_key_reuse_test(WC_ML_DSA_44,
-        MLDSA_KAT_DIGEST(mldsa_kat_digest_44));
+        MLDSA_KAT_DIGEST(mldsa_kat_digest_44), NULL);
     if (ret != 0)
         ERROR_OUT(ret, out);
 #endif
 #ifndef WOLFSSL_NO_ML_DSA_65
     ret = mldsa_make_key_reuse_test(WC_ML_DSA_65,
-        MLDSA_KAT_DIGEST(mldsa_kat_digest_65));
+        MLDSA_KAT_DIGEST(mldsa_kat_digest_65),
+        MLDSA_KAT_PUB_DIGEST_65);
     if (ret != 0)
         ERROR_OUT(ret, out);
 #endif
 #ifndef WOLFSSL_NO_ML_DSA_87
     ret = mldsa_make_key_reuse_test(WC_ML_DSA_87,
-        MLDSA_KAT_DIGEST(mldsa_kat_digest_87));
+        MLDSA_KAT_DIGEST(mldsa_kat_digest_87), NULL);
     if (ret != 0)
         ERROR_OUT(ret, out);
 #endif
